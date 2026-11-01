@@ -308,6 +308,34 @@ function getHomeFilters() {
     };
 }
 
+async function getHomeData() {
+    const homeInfo = getHomeFilters();
+    let list = [];
+    try {
+        const cats = [100, 101, 102, 103];
+        const results = await Promise.all(
+            cats.map(cid => postApiWithCache('/video/list', { parent_category_id: cid, page: 1 }, 1800 * 1000))
+        );
+        for (const res of results) {
+            const rawList = (res && res.data && Array.isArray(res.data.video_list)) ? res.data.video_list : [];
+            const sliced = rawList.slice(0, 10).map(v => ({
+                vod_id: String(v.id),
+                vod_name: v.title || '',
+                vod_pic: v.pic || '',
+                vod_remarks: v.remark || v.state || (v.year ? String(v.year) : '')
+            }));
+            list.push(...sliced);
+        }
+    } catch (e) {
+        console.error('getHomeData error:', e);
+    }
+    return {
+        class: homeInfo.class,
+        filters: homeInfo.filters,
+        list: list
+    };
+}
+
 async function handleCategory(tid, pg, extend = {}) {
     const page = parseInt(pg || 1);
     const payload = {
@@ -345,10 +373,11 @@ async function handleCategory(tid, pg, extend = {}) {
     }));
 
     const total = (res && res.data && res.data.video_total) ? res.data.video_total : list.length;
+    const pageSize = list.length || 50;
     return {
         page: page,
-        pagecount: Math.ceil(total / 24) || page,
-        limit: 24,
+        pagecount: Math.ceil(total / pageSize) || page,
+        limit: pageSize,
         total: total,
         list: list
     };
@@ -402,10 +431,11 @@ async function handleSearch(wd, pg = 1) {
     }));
 
     const total = (res && res.data && res.data.video_total) ? res.data.video_total : list.length;
+    const pageSize = list.length || 24;
     return {
         page: page,
-        pagecount: Math.ceil(total / 24) || page,
-        limit: 24,
+        pagecount: Math.ceil(total / pageSize) || page,
+        limit: pageSize,
         total: total,
         list: list
     };
@@ -440,44 +470,38 @@ async function handlePlay(id, flag) {
 
 // ==================== 4. 统一路由调度器 ====================
 async function handleRequest(query = {}) {
-    // 1. 过滤与分类接口
-    if (query.filter === 'true' || query.ac === 'filter' || query.ac === 'classes') {
-        return getHomeFilters();
-    }
-
-    // 2. 播放接口
+    // 1. 播放接口
     if (query.play) {
         return await handlePlay(query.play, query.flag);
     }
 
-    // 3. 详情与搜索接口
-    if (query.ac === 'detail' || query.ids || query.wd || query.t) {
-        if (query.ids) {
-            return await handleDetail(query.ids);
-        }
-        if (query.wd) {
-            return await handleSearch(query.wd, query.pg || 1);
-        }
-        if (query.t) {
-            let extend = {};
-            if (query.f) {
-                try { extend = JSON.parse(query.f); } catch (e) {}
-            } else if (query.ext) {
-                try {
-                    const decoded = Buffer.from(query.ext, 'base64').toString('utf8');
-                    extend = JSON.parse(decoded);
-                } catch (e) {
-                    try { extend = JSON.parse(query.ext); } catch (e2) {}
-                }
-            } else {
-                extend = query;
+    // 2. 详情与搜索与分类接口
+    if (query.ids) {
+        return await handleDetail(query.ids);
+    }
+    if (query.wd) {
+        return await handleSearch(query.wd, query.pg || 1);
+    }
+    if (query.t) {
+        let extend = {};
+        if (query.f) {
+            try { extend = JSON.parse(query.f); } catch (e) {}
+        } else if (query.ext) {
+            try {
+                const decoded = Buffer.from(query.ext, 'base64').toString('utf8');
+                extend = JSON.parse(decoded);
+            } catch (e) {
+                try { extend = JSON.parse(query.ext); } catch (e2) {}
             }
-            return await handleCategory(query.t, query.pg || 1, extend);
+        } else {
+            extend = query;
         }
+        return await handleCategory(query.t, query.pg || 1, extend);
     }
 
-    // 4. 默认首页精选 (homeVod)
-    return await handleCategory('100', 1, {});
+    // 3. 首页与分类过滤接口（?filter=true, ?filter=false, ?ac=filter, ?ac=videolist, 根目录等）
+    // 必须同时返回 class (分类列表)、filters (筛选选项) 以及 list (更新推荐视频流)
+    return await getHomeData();
 }
 
 // ==================== 5. Vercel Serverless Function 适配器 ====================
@@ -495,7 +519,10 @@ module.exports = async (req, res) => {
     }
 
     try {
-        const query = req.query || {};
+        let query = req.query || {};
+        if (req.method === 'POST' && req.body) {
+            query = { ...query, ...(typeof req.body === 'object' ? req.body : {}) };
+        }
         const result = await handleRequest(query);
         res.statusCode = 200;
         res.end(JSON.stringify(result));
