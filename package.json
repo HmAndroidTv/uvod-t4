@@ -1,0 +1,15 @@
+{
+  "name": "uvod-t4-service",
+  "version": "1.0.0",
+  "description": "High-performance CatVod T4 API service for Uvod",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["catvod", "t4", "tvbox", "fongmi"],
+  "author": "amazonjdshop",
+  "license": "ISC"
+}
