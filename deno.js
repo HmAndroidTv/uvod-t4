@@ -508,10 +508,116 @@ async function handleRequest(query = {}) {
     return await getHomeData();
 }
 
+// ==================== 4.5 华视 (Huavod) VIP 统一集中鉴权与单例自愈续期 ====================
+let huavodCookieCache = "user_id=78018; user_name=linda1030; group_id=3; group_name=VIP%E4%BC%9A%E5%91%98; user_check=3bd12e156ec5b31ec3b2696d769a318e; user_portrait=%2Fstatic%2Fimages%2Ftouxiang.png; server_name_session=71f383bad1cadf96b601f1686d96e251;";
+let huavodCookieExpire = Date.now() + 12 * 3600 * 1000;
+let isHuavodRenewing = false;
+let lastHuavodLoginAttempt = 0;
+
+let denoKv = null;
+if (typeof Deno !== 'undefined' && typeof Deno.openKv === 'function') {
+    try {
+        denoKv = await Deno.openKv();
+    } catch (e) {}
+}
+
+async function getHuavodCookie(force = false) {
+    // 1. 若有 Deno KV，冷启动时尝试从持久化 KV 读取
+    if (denoKv && (!huavodCookieCache || Date.now() > huavodCookieExpire)) {
+        try {
+            const entry = await denoKv.get(['huavod_cookie']);
+            if (entry && entry.value && entry.value.cookie && entry.value.expire > Date.now()) {
+                huavodCookieCache = entry.value.cookie;
+                huavodCookieExpire = entry.value.expire;
+                if (!force) return huavodCookieCache;
+            }
+        } catch (e) {}
+    }
+
+    // 2. 命中有效热缓存直接返回 (毫秒级响应，0 上游负载)
+    if (!force && huavodCookieCache && Date.now() < huavodCookieExpire && huavodCookieCache.includes('user_check=')) {
+        return huavodCookieCache;
+    }
+
+    // 3. 频控锁：全网无论并发收到多少请求，至少间隔 30 秒才允许向官方发起 1 次真实登录，杜绝风控与多端互踢
+    if (isHuavodRenewing) {
+        return huavodCookieCache;
+    }
+    if (Date.now() - lastHuavodLoginAttempt < 30000) {
+        return huavodCookieCache;
+    }
+
+    isHuavodRenewing = true;
+    lastHuavodLoginAttempt = Date.now();
+
+    try {
+        const loginTargets = [
+            'https://huavod.com/index.php/user/login.html',
+            'https://huavod.net/index.php/user/login.html'
+        ];
+
+        for (const loginUrl of loginTargets) {
+            try {
+                const res = await fetch(loginUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': loginUrl
+                    },
+                    body: 'user_name=linda1030&user_pwd=Qwer1234'
+                });
+
+                let setCookies = [];
+                if (typeof res.headers.getSetCookie === 'function') {
+                    setCookies = res.headers.getSetCookie();
+                } else {
+                    const sc = res.headers.get('set-cookie');
+                    if (sc) setCookies = [sc];
+                }
+
+                if (setCookies && setCookies.length > 0) {
+                    const cookieMap = {};
+                    for (const item of setCookies) {
+                        for (const piece of item.split(/,(?=[a-zA-Z0-9_-]+=)/)) {
+                            const first = piece.split(';')[0].trim();
+                            const eqIdx = first.indexOf('=');
+                            if (eqIdx !== -1) {
+                                cookieMap[first.substring(0, eqIdx).trim()] = first.substring(eqIdx + 1).trim();
+                            }
+                        }
+                    }
+
+                    if (cookieMap['user_check']) {
+                        huavodCookieCache = Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join('; ') + ';';
+                        huavodCookieExpire = Date.now() + 12 * 3600 * 1000; // 缓存 12 小时
+
+                        if (denoKv) {
+                            try {
+                                await denoKv.set(['huavod_cookie'], { cookie: huavodCookieCache, expire: huavodCookieExpire });
+                            } catch (e) {}
+                        }
+                        console.log('[Huavod Auth] 官方会话登录与续期成功！最新 Cookie 已同步至内存与 KV 缓存池');
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.error(`[Huavod Auth] 登录接口 ${loginUrl} 异常:`, err.message);
+            }
+        }
+    } finally {
+        isHuavodRenewing = false;
+    }
+
+    return huavodCookieCache;
+}
+
 // ==================== 5. Deno.serve 监听服务 ====================
 export default {
     async fetch(req) {
         const url = new URL(req.url);
+        const path = url.pathname;
         let query = Object.fromEntries(url.searchParams.entries());
 
         if (req.method === 'OPTIONS') {
@@ -521,6 +627,34 @@ export default {
                     'Access-Control-Allow-Origin': '*',
                     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
                     'Access-Control-Allow-Headers': 'Content-Type, User-Agent'
+                }
+            });
+        }
+
+        // 华视 (Huavod) VIP 统一集中鉴权与 Cookie 分发接口
+        if (path === '/huavod/cookie' || path === '/huavod/cookie.txt' || path === '/huavod/token' || path === '/cookie' || query.ac === 'huavod_cookie') {
+            const force = query.force === '1';
+            const cookie = await getHuavodCookie(force);
+            const isTxt = path.endsWith('.txt') || query.raw === '1';
+
+            if (isTxt) {
+                return new Response(cookie, {
+                    headers: {
+                        'Content-Type': 'text/plain; charset=utf-8',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+
+            return new Response(JSON.stringify({
+                status: (cookie && cookie.includes('user_check=')) ? 'ok' : 'failed',
+                cookie: cookie,
+                expire: huavodCookieExpire,
+                cached: !force
+            }), {
+                headers: {
+                    'Content-Type': 'application/json; charset=utf-8',
+                    'Access-Control-Allow-Origin': '*'
                 }
             });
         }

@@ -504,6 +504,83 @@ async function handleRequest(query = {}) {
     return await getHomeData();
 }
 
+// ==================== 4.5 华视 (Huavod) VIP 统一集中鉴权与单例自愈续期 ====================
+let huavodCookieCache = "user_id=78018; user_name=linda1030; group_id=3; group_name=VIP%E4%BC%9A%E5%91%98; user_check=3bd12e156ec5b31ec3b2696d769a318e; user_portrait=%2Fstatic%2Fimages%2Ftouxiang.png; server_name_session=71f383bad1cadf96b601f1686d96e251;";
+let huavodCookieExpire = Date.now() + 12 * 3600 * 1000;
+let isHuavodRenewing = false;
+let lastHuavodLoginAttempt = 0;
+
+async function getHuavodCookie(force = false) {
+    if (!force && huavodCookieCache && Date.now() < huavodCookieExpire && huavodCookieCache.includes('user_check=')) {
+        return huavodCookieCache;
+    }
+    if (isHuavodRenewing) {
+        return huavodCookieCache;
+    }
+    if (Date.now() - lastHuavodLoginAttempt < 30000) {
+        return huavodCookieCache;
+    }
+
+    isHuavodRenewing = true;
+    lastHuavodLoginAttempt = Date.now();
+
+    try {
+        const loginTargets = [
+            'https://huavod.com/index.php/user/login.html',
+            'https://huavod.net/index.php/user/login.html'
+        ];
+
+        for (const loginUrl of loginTargets) {
+            try {
+                const res = await fetch(loginUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': loginUrl
+                    },
+                    body: 'user_name=linda1030&user_pwd=Qwer1234'
+                });
+
+                let setCookies = [];
+                if (typeof res.headers.getSetCookie === 'function') {
+                    setCookies = res.headers.getSetCookie();
+                } else {
+                    const sc = res.headers.get('set-cookie');
+                    if (sc) setCookies = [sc];
+                }
+
+                if (setCookies && setCookies.length > 0) {
+                    const cookieMap = {};
+                    for (const item of setCookies) {
+                        for (const piece of item.split(/,(?=[a-zA-Z0-9_-]+=)/)) {
+                            const first = piece.split(';')[0].trim();
+                            const eqIdx = first.indexOf('=');
+                            if (eqIdx !== -1) {
+                                cookieMap[first.substring(0, eqIdx).trim()] = first.substring(eqIdx + 1).trim();
+                            }
+                        }
+                    }
+
+                    if (cookieMap['user_check']) {
+                        huavodCookieCache = Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join('; ') + ';';
+                        huavodCookieExpire = Date.now() + 12 * 3600 * 1000;
+                        console.log('[Huavod Auth] 官方会话登录与续期成功！最新 Cookie 已同步');
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.error(`[Huavod Auth] 登录接口 ${loginUrl} 异常:`, err.message);
+            }
+        }
+    } finally {
+        isHuavodRenewing = false;
+    }
+
+    return huavodCookieCache;
+}
+
 // ==================== 5. Vercel Serverless Function 适配器 ====================
 module.exports = async (req, res) => {
     // 允许跨域
@@ -515,6 +592,32 @@ module.exports = async (req, res) => {
     if (req.method === 'OPTIONS') {
         res.statusCode = 204;
         res.end();
+        return;
+    }
+
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const path = parsedUrl.pathname;
+
+    // 华视 (Huavod) VIP 统一集中鉴权分发接口
+    if (path === '/huavod/cookie' || path === '/huavod/cookie.txt' || path === '/cookie' || req.query?.ac === 'huavod_cookie') {
+        const force = (req.query?.force === '1');
+        const cookie = await getHuavodCookie(force);
+        const isTxt = path.endsWith('.txt') || req.query?.raw === '1';
+
+        if (isTxt) {
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.statusCode = 200;
+            res.end(cookie);
+            return;
+        }
+
+        res.statusCode = 200;
+        res.end(JSON.stringify({
+            status: (cookie && cookie.includes('user_check=')) ? 'ok' : 'failed',
+            cookie: cookie,
+            expire: huavodCookieExpire,
+            cached: !force
+        }));
         return;
     }
 
