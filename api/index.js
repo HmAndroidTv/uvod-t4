@@ -588,7 +588,7 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
     if (!channelId) channelId = "538";
     const cacheKey = String(channelId);
 
-    // 1. 尝试从内存热缓存读取 (TTL: 7 分钟)
+    // 1. 尝试从内存热缓存读取 (TTL: 75 秒，上游 Token 约 120 秒失效)
     if (!force && huavodLiveTokenMap.has(cacheKey)) {
         const item = huavodLiveTokenMap.get(cacheKey);
         if (item && item.expire > Date.now()) {
@@ -655,7 +655,7 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
         const cacheObj = {
             url: finalUrl,
             token: result.token,
-            expire: Date.now() + 7 * 60 * 1000 // 缓存 7 分钟
+            expire: Date.now() + 75 * 1000 // 缓存 75 秒（上游 Token 有效期约 120 秒，75 秒换新确保 Token 永不过期）
         };
         huavodLiveTokenMap.set(cacheKey, cacheObj);
         return { url: finalUrl, token: result.token, cached: false };
