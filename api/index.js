@@ -582,28 +582,25 @@ async function getHuavodCookie(force = false) {
 }
 
 // ==================== 4.6 华视 (Huavod) 直播流统一自愈解析与 Token 缓存中枢 ====================
-const huavodLiveTokenMap = new Map();
+let huavodGlobalLiveToken = {
+    token: "",
+    expire: 0
+};
 
 async function getHuavodLiveStream(channelId = "538", stream = "", force = false) {
     if (!channelId) channelId = "538";
-    const cacheKey = String(channelId);
+    const sName = stream || "CCTV1_MG";
 
-    // 1. 尝试从内存热缓存读取 (TTL: 75 秒，上游 Token 约 120 秒失效)
-    if (!force && huavodLiveTokenMap.has(cacheKey)) {
-        const item = huavodLiveTokenMap.get(cacheKey);
-        if (item && item.expire > Date.now()) {
-            let finalUrl = item.url;
-            if (stream && !finalUrl.includes(`/${stream}.m3u8`)) {
-                finalUrl = `https://live.huarenlivewebsite1.top/stream/${stream}.m3u8?auth=${item.token}`;
-            }
-            return { url: finalUrl, token: item.token, cached: true };
-        }
+    // 1. 尝试从全局共享热缓存读取有效 Token (TTL: 75 秒，上游 Token 约 120 秒失效)
+    if (!force && huavodGlobalLiveToken.token && huavodGlobalLiveToken.expire > Date.now()) {
+        const finalUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${huavodGlobalLiveToken.token}`;
+        return { url: finalUrl, token: huavodGlobalLiveToken.token, cached: true };
     }
 
     // 2. 辅助解析函数：使用 VIP Cookie 爬取页面并提取已授权播放流地址与 auth Token
-    async function fetchStreamFromPage(cookieStr) {
+    async function fetchStreamFromPage(targetChId, cookieStr) {
         try {
-            const pageUrl = `https://huavod.com/liveplay/${channelId}-1.html`;
+            const pageUrl = `https://huavod.com/liveplay/${targetChId}-1.html`;
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), 6000);
             const pageRes = await fetch(pageUrl, {
@@ -618,19 +615,11 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
             if (!pageRes.ok) return null;
             const html = await pageRes.text();
 
-            const liveMatch = html.match(/https?:\/\/live\.[^"'\s]+auth=[^"'\s]+/);
-            let extractedUrl = liveMatch ? liveMatch[0] : "";
-
             const authMatch = html.match(/auth=([^"'&\s;]+)/);
             const token = authMatch ? authMatch[1] : "";
 
             if (!token) return null;
-
-            if (!extractedUrl) {
-                const sName = stream || "CCTV1_MG";
-                extractedUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${token}`;
-            }
-            return { url: extractedUrl, token: token };
+            return { token: token };
         } catch (e) {
             return null;
         }
@@ -638,26 +627,27 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
 
     // 3. 第一轮尝试：读取当前 VIP Cookie 抓取
     let cookie = await getHuavodCookie(force);
-    let result = await fetchStreamFromPage(cookie);
+    let result = await fetchStreamFromPage(channelId, cookie);
 
     // 4. 自愈机制：若页面未返回有效 auth Token（Session 过期），强制重新登录并重试
     if (!result) {
         console.log(`[Huavod Live] 频道 ${channelId} 未获取到 Token，可能 Session 已失效，触发强制登录重试...`);
         cookie = await getHuavodCookie(true);
-        result = await fetchStreamFromPage(cookie);
+        result = await fetchStreamFromPage(channelId, cookie);
+    }
+
+    // 5. 兜底保障：若目标频道页未提取到 Token，立即使用稳定台 CCTV-1 (538) 获取通用全局 VIP Token
+    if (!result && channelId !== "538") {
+        console.log(`[Huavod Live] 频道 ${channelId} 页面未返回 Token，使用 CCTV-1 (538) 兜底获取全局 Token...`);
+        result = await fetchStreamFromPage("538", cookie);
     }
 
     if (result && result.token) {
-        let finalUrl = result.url;
-        if (stream && !finalUrl.includes(`/${stream}.m3u8`)) {
-            finalUrl = `https://live.huarenlivewebsite1.top/stream/${stream}.m3u8?auth=${result.token}`;
-        }
-        const cacheObj = {
-            url: finalUrl,
+        huavodGlobalLiveToken = {
             token: result.token,
             expire: Date.now() + 75 * 1000 // 缓存 75 秒（上游 Token 有效期约 120 秒，75 秒换新确保 Token 永不过期）
         };
-        huavodLiveTokenMap.set(cacheKey, cacheObj);
+        const finalUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${result.token}`;
         return { url: finalUrl, token: result.token, cached: false };
     }
 
