@@ -613,6 +613,112 @@ async function getHuavodCookie(force = false) {
     return huavodCookieCache;
 }
 
+// ==================== 4.6 华视 (Huavod) 直播流统一自愈解析与 Token 缓存中枢 ====================
+const huavodLiveTokenMap = new Map();
+
+async function getHuavodLiveStream(channelId = "538", stream = "", force = false) {
+    if (!channelId) channelId = "538";
+    const cacheKey = String(channelId);
+
+    // 1. 尝试从内存热缓存读取 (TTL: 7 分钟)
+    if (!force && huavodLiveTokenMap.has(cacheKey)) {
+        const item = huavodLiveTokenMap.get(cacheKey);
+        if (item && item.expire > Date.now()) {
+            let finalUrl = item.url;
+            if (stream && !finalUrl.includes(`/${stream}.m3u8`)) {
+                finalUrl = `https://live.huarenlivewebsite1.top/stream/${stream}.m3u8?auth=${item.token}`;
+            }
+            return { url: finalUrl, token: item.token, cached: true };
+        }
+    }
+
+    // 2. 尝试从 Deno KV 读取持久化缓存
+    if (denoKv && !force) {
+        try {
+            const entry = await denoKv.get(['huavod_live', cacheKey]);
+            if (entry && entry.value && entry.value.expire > Date.now()) {
+                const item = entry.value;
+                huavodLiveTokenMap.set(cacheKey, item);
+                let finalUrl = item.url;
+                if (stream && !finalUrl.includes(`/${stream}.m3u8`)) {
+                    finalUrl = `https://live.huarenlivewebsite1.top/stream/${stream}.m3u8?auth=${item.token}`;
+                }
+                return { url: finalUrl, token: item.token, cached: true };
+            }
+        } catch (e) {}
+    }
+
+    // 3. 辅助解析函数：使用 VIP Cookie 爬取页面并提取已授权播放流地址与 auth Token
+    async function fetchStreamFromPage(cookieStr) {
+        try {
+            const pageUrl = `https://huavod.com/liveplay/${channelId}-1.html`;
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 6000);
+            const pageRes = await fetch(pageUrl, {
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Cookie': cookieStr,
+                    'Referer': 'https://huavod.com/'
+                }
+            });
+            clearTimeout(timer);
+            if (!pageRes.ok) return null;
+            const html = await pageRes.text();
+
+            // 提取 live 地址
+            const liveMatch = html.match(/https?:\/\/live\.[^"'\s]+auth=[^"'\s]+/);
+            let extractedUrl = liveMatch ? liveMatch[0] : "";
+
+            // 提取 auth Token
+            const authMatch = html.match(/auth=([^"'&\s;]+)/);
+            const token = authMatch ? authMatch[1] : "";
+
+            if (!token) return null;
+
+            if (!extractedUrl) {
+                const sName = stream || "CCTV1_MG";
+                extractedUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${token}`;
+            }
+            return { url: extractedUrl, token: token };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 4. 第一轮尝试：读取当前内存/KV 中的 VIP Cookie 抓取
+    let cookie = await getHuavodCookie(force);
+    let result = await fetchStreamFromPage(cookie);
+
+    // 5. 自愈机制：若页面未返回有效 auth Token（上游 Cookie 失效或已踢下线），强制重新向官方发起单例登录并重试
+    if (!result) {
+        console.log(`[Huavod Live] 频道 ${channelId} 未获取到 Token，可能 Session 已失效，触发强制登录重试...`);
+        cookie = await getHuavodCookie(true);
+        result = await fetchStreamFromPage(cookie);
+    }
+
+    if (result && result.token) {
+        let finalUrl = result.url;
+        if (stream && !finalUrl.includes(`/${stream}.m3u8`)) {
+            finalUrl = `https://live.huarenlivewebsite1.top/stream/${stream}.m3u8?auth=${result.token}`;
+        }
+        const cacheObj = {
+            url: finalUrl,
+            token: result.token,
+            expire: Date.now() + 7 * 60 * 1000 // 缓存 7 分钟
+        };
+        huavodLiveTokenMap.set(cacheKey, cacheObj);
+        if (denoKv) {
+            try {
+                await denoKv.set(['huavod_live', cacheKey], cacheObj);
+            } catch (e) {}
+        }
+        return { url: finalUrl, token: result.token, cached: false };
+    }
+
+    return null;
+}
+
 // ==================== 5. Deno.serve 监听服务 ====================
 export default {
     async fetch(req) {
@@ -631,8 +737,61 @@ export default {
             });
         }
 
+        // 华视 (Huavod) VIP 直播流集中解析与 Token 分发接口 (/huavod/live, /huavod/token)
+        if (path === '/huavod/live' || path === '/huavod/token' || query.ac === 'huavod_live') {
+            const channelId = query.id || "538";
+            const stream = query.stream || "";
+            const force = query.force === '1';
+            const result = await getHuavodLiveStream(channelId, stream, force);
+
+            if (result && result.url) {
+                // 支持直接 302 重定向
+                if (query.redirect === '1' || query.raw === '1' || path.endsWith('.m3u8')) {
+                    return new Response(null, {
+                        status: 302,
+                        headers: {
+                            'Location': result.url,
+                            'Access-Control-Allow-Origin': '*',
+                            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                            'Access-Control-Expose-Headers': 'Location',
+                            'Cache-Control': 'no-cache, no-store, must-revalidate',
+                            'X-Stream-Cached': String(result.cached)
+                        }
+                    });
+                }
+
+                return new Response(JSON.stringify({
+                    status: "ok",
+                    url: result.url,
+                    token: result.token,
+                    cached: result.cached,
+                    header: {
+                        "Referer": "https://huavod.com/",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                }), {
+                    headers: {
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+
+            return new Response(JSON.stringify({
+                status: "failed",
+                error: "Token resolution failed",
+                url: ""
+            }), {
+                status: 500,
+                headers: {
+                    'Content-Type': 'application/json; charset=utf-8',
+                    'Access-Control-Allow-Origin': '*'
+                }
+            });
+        }
+
         // 华视 (Huavod) VIP 统一集中鉴权与 Cookie 分发接口
-        if (path === '/huavod/cookie' || path === '/huavod/cookie.txt' || path === '/huavod/token' || path === '/cookie' || query.ac === 'huavod_cookie') {
+        if (path === '/huavod/cookie' || path === '/huavod/cookie.txt' || path === '/cookie' || query.ac === 'huavod_cookie') {
             const force = query.force === '1';
             const cookie = await getHuavodCookie(force);
             const isTxt = path.endsWith('.txt') || query.raw === '1';
