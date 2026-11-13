@@ -591,7 +591,7 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
     if (!channelId) channelId = "538";
     const sName = stream || "CCTV1_MG";
 
-    // 1. 尝试从全局共享热缓存读取有效 Token (TTL: 75 秒，上游 Token 约 120 秒失效)
+    // 1. 尝试从全局共享热缓存读取有效 Token (TTL: 30 秒，上游 Token 约 100-120 秒失效，30 秒换新彻底杜绝过期)
     if (!force && huavodGlobalLiveToken.token && huavodGlobalLiveToken.expire > Date.now()) {
         const finalUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${huavodGlobalLiveToken.token}`;
         return { url: finalUrl, token: huavodGlobalLiveToken.token, cached: true };
@@ -645,7 +645,7 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
     if (result && result.token) {
         huavodGlobalLiveToken = {
             token: result.token,
-            expire: Date.now() + 75 * 1000 // 缓存 75 秒（上游 Token 有效期约 120 秒，75 秒换新确保 Token 永不过期）
+            expire: Date.now() + 30 * 1000 // 缓存 30 秒（上游 Token 约 100-120 秒失效，30 秒换新确保 Token 绝对新鲜）
         };
         const finalUrl = `https://live.huarenlivewebsite1.top/stream/${sName}.m3u8?auth=${result.token}`;
         return { url: finalUrl, token: result.token, cached: false };
@@ -672,14 +672,14 @@ module.exports = async (req, res) => {
     const path = parsedUrl.pathname;
 
     // 华视 (Huavod) VIP 直播流集中解析与 Token 分发接口 (/huavod/live, /huavod/token)
-    if (path === '/huavod/live' || path === '/huavod/token' || req.query?.ac === 'huavod_live') {
-        const channelId = req.query?.id || "538";
-        const stream = req.query?.stream || "";
-        const force = (req.query?.force === '1');
+    if (path === '/huavod/live' || path === '/huavod/token' || parsedUrl.searchParams.get('ac') === 'huavod_live' || req.query?.ac === 'huavod_live') {
+        const channelId = parsedUrl.searchParams.get('id') || req.query?.id || "538";
+        const stream = parsedUrl.searchParams.get('stream') || req.query?.stream || "";
+        const force = (parsedUrl.searchParams.get('force') === '1') || (req.query?.force === '1');
         const result = await getHuavodLiveStream(channelId, stream, force);
 
         if (result && result.url) {
-            if (req.query?.redirect === '1' || req.query?.raw === '1' || path.endsWith('.m3u8')) {
+            if (parsedUrl.searchParams.get('redirect') === '1' || parsedUrl.searchParams.get('raw') === '1' || req.query?.redirect === '1' || req.query?.raw === '1' || path.endsWith('.m3u8')) {
                 res.writeHead(302, {
                     'Location': result.url,
                     'Access-Control-Allow-Origin': '*',
