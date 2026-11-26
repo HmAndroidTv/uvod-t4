@@ -505,10 +505,41 @@ async function handleRequest(query = {}) {
 }
 
 // ==================== 4.5 华视 (Huavod) VIP 统一集中鉴权与单例自愈续期 ====================
+const HUAVOD_SESSION_URL = 'https://raw.githubusercontent.com/amazonjdshop/tv/main/session.json';
+
 let huavodCookieCache = "";
 let huavodCookieExpire = 0;
 let isHuavodRenewing = false;
 let lastHuavodLoginAttempt = 0;
+
+async function fetchHuavodCredentials() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+        const res = await fetch(`${HUAVOD_SESSION_URL}?t=${Date.now()}`, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Cache-Control': 'no-cache'
+            },
+            signal: controller.signal
+        });
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const user_name = data?.username || data?.user_name || '';
+        const user_pwd = data?.password || data?.user_pwd || '';
+        if (!user_name || !user_pwd) {
+            throw new Error('session.json 缺少 username 或 password');
+        }
+        return { user_name, user_pwd };
+    } catch (err) {
+        console.error('[Huavod Auth] 获取远程 session.json 失败:', err.message);
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 async function getHuavodCookie(force = false) {
     if (!force && huavodCookieCache && Date.now() < huavodCookieExpire && huavodCookieCache.includes('user_check=')) {
@@ -525,6 +556,15 @@ async function getHuavodCookie(force = false) {
     lastHuavodLoginAttempt = Date.now();
 
     try {
+        const creds = await fetchHuavodCredentials();
+        if (!creds) {
+            if (force) {
+                huavodCookieCache = "";
+                huavodCookieExpire = 0;
+            }
+            return huavodCookieCache;
+        }
+
         const loginTargets = [
             'https://huavod.com/index.php/user/login.html',
             'https://huavod.net/index.php/user/login.html'
@@ -541,8 +581,8 @@ async function getHuavodCookie(force = false) {
                         'Referer': loginUrl
                     },
                     body: new URLSearchParams({
-                        user_name: 'frank2775',
-                        user_pwd: 'lYoRA*5^JvS4'
+                        user_name: creds.user_name,
+                        user_pwd: creds.user_pwd
                     }).toString()
                 });
 
