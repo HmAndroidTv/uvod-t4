@@ -767,8 +767,22 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
 }
 
 // ==================== 5. Deno.serve 监听服务 ====================
+function getClientIp(req, info) {
+    const cfIp = req.headers.get('cf-connecting-ip');
+    if (cfIp) return cfIp.trim();
+    const xff = req.headers.get('x-forwarded-for');
+    if (xff) return xff.split(',')[0].trim();
+    const realIp = req.headers.get('x-real-ip');
+    if (realIp) return realIp.trim();
+    if (info && info.remoteAddr && info.remoteAddr.hostname) return info.remoteAddr.hostname;
+    return 'unknown';
+}
+
 export default {
-    async fetch(req) {
+    async fetch(req, info) {
+        const clientIp = getClientIp(req, info);
+        console.log(`[Incoming] IP: ${clientIp} | ${req.method} ${req.url}`);
+
         const url = new URL(req.url);
         const path = url.pathname;
         let query = Object.fromEntries(url.searchParams.entries());
@@ -900,8 +914,8 @@ export default {
 };
 
 if (typeof Deno !== 'undefined' && Deno.serve) {
-    Deno.serve(async (req) => {
-        return (await import(import.meta.url)).default.fetch(req);
+    Deno.serve(async (req, info) => {
+        return (await import(import.meta.url)).default.fetch(req, info);
     });
 }
 

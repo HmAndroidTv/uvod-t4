@@ -703,6 +703,18 @@ async function getHuavodLiveStream(channelId = "538", stream = "", force = false
 
 // ==================== 5. Vercel Serverless Function 适配器 ====================
 module.exports = async (req, res) => {
+    const xff = req.headers['x-forwarded-for'];
+    const clientIp = (
+        req.headers['cf-connecting-ip'] ||
+        (typeof xff === 'string' ? xff.split(',')[0].trim() : Array.isArray(xff) ? xff[0] : '') ||
+        req.headers['x-real-ip'] ||
+        req.socket?.remoteAddress ||
+        'unknown'
+    );
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const host = req.headers.host || 'localhost';
+    console.log(`[Incoming] IP: ${clientIp} | ${req.method} ${proto}://${host}${req.url}`);
+
     // 允许跨域
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
