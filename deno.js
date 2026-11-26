@@ -509,8 +509,8 @@ async function handleRequest(query = {}) {
 }
 
 // ==================== 4.5 华视 (Huavod) VIP 统一集中鉴权与单例自愈续期 ====================
-let huavodCookieCache = "user_id=78018; user_name=linda1030; group_id=3; group_name=VIP%E4%BC%9A%E5%91%98; user_check=3bd12e156ec5b31ec3b2696d769a318e; user_portrait=%2Fstatic%2Fimages%2Ftouxiang.png; server_name_session=71f383bad1cadf96b601f1686d96e251;";
-let huavodCookieExpire = Date.now() + 12 * 3600 * 1000;
+let huavodCookieCache = "";
+let huavodCookieExpire = 0;
 let isHuavodRenewing = false;
 let lastHuavodLoginAttempt = 0;
 
