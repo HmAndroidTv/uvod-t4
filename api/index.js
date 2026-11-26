@@ -540,7 +540,10 @@ async function getHuavodCookie(force = false) {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Referer': loginUrl
                     },
-                    body: 'user_name=linda1030&user_pwd=Qwer1234'
+                    body: new URLSearchParams({
+                        user_name: 'frank2775',
+                        user_pwd: 'lYoRA*5^JvS4'
+                    }).toString()
                 });
 
                 let setCookies = [];
@@ -567,12 +570,16 @@ async function getHuavodCookie(force = false) {
                         huavodCookieCache = Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join('; ') + ';';
                         huavodCookieExpire = Date.now() + 12 * 3600 * 1000;
                         console.log('[Huavod Auth] 官方会话登录与续期成功！最新 Cookie 已同步');
-                        break;
+                        return huavodCookieCache;
                     }
                 }
             } catch (err) {
                 console.error(`[Huavod Auth] 登录接口 ${loginUrl} 异常:`, err.message);
             }
+        }
+        if (force) {
+            huavodCookieCache = "";
+            huavodCookieExpire = 0;
         }
     } finally {
         isHuavodRenewing = false;
